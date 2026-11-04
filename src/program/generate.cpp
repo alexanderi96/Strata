@@ -8117,7 +8117,10 @@ int main(int argc, char** argv) {
     strata::core::ExpertCache* ep_cache = nullptr;
     // EXPERIMENT STRATA_EP_CPU=1: the coldest experts may be on neither card; the host's CPU pool computes their rows
     // inside the expert-parallel window (Verifier: VerifyEp::h_res01).  Unset: the placement and output as before.
-    static const bool ep_cpu = [] { const char* v = std::getenv("STRATA_EP_CPU"); return v != nullptr && v[0] == '1'; }();
+    // ep_cpu: the variable is set AND the pair cannot hold every expert (a pair that can runs the plain EP window:
+    // the tail's host round trip per layer costs ~13% of decode there for nothing)
+    static const bool ep_cpu_env = [] { const char* v = std::getenv("STRATA_EP_CPU"); return v != nullptr && v[0] == '1'; }();
+    bool ep_cpu = false;
     if (o.ep_device >= 0) {
         if (o.expert_cache <= 0 || profile.empty() || !xcache.per_layer_admission()) {
             std::fprintf(stderr, "strata generate: --expert-parallel-device needs the profile and an expert cache "
@@ -8128,10 +8131,11 @@ int main(int argc, char** argv) {
         xcache.layer_slot_range(0, lo, hi);
         const int64_t q0 = hi - lo;
         int64_t q1 = g.n_expert - q0;
-        if (ep_cpu && q1 > 0) {
-            // STRATA_EP_CPU=1: card 1 takes what fits in its free VRAM (less --vram-reserve-mib and 512 MiB for the
-            // verifiers' own buffers there: inbox, rows, plans, scratch, tables, graphs); the coldest rest of each
-            // layer is on neither card and the host's CPU pool computes it inside the window
+        if (ep_cpu_env && q1 > 0) {
+            // STRATA_EP_CPU=1: when card 1 cannot take the other q1 beside its reserve (the plain EP check below), it
+            // takes what fits less the reserve and 512 MiB for the verifiers' own buffers there (inbox, rows, plans,
+            // scratch, tables, graphs); the coldest rest of each layer is on neither card and the host's CPU pool
+            // computes it inside the window
             size_t fb = 0, tb = 0;
             {
                 const strata::core::OnDevice on(o.ep_device);
@@ -8140,10 +8144,15 @@ int main(int argc, char** argv) {
             const auto& lay = strata::kernels::cpu::expert_layout();
             uint64_t per_slot = 0;   // one slot in every layer (the peer's cache gives each layer the same count)
             for (int64_t l = 0; l < g.n_layers; ++l) per_slot += (lay.blob_bytes(l) + 255) / 256 * 256;
-            const uint64_t keep = ((uint64_t) o.vram_reserve_mib + 512) << 20;
-            const int64_t fit = per_slot > 0 && (uint64_t) fb > keep ? (int64_t) (((uint64_t) fb - keep) / per_slot) : 0;
-            q1 = std::min(q1, fit);
-            if (q1 <= 0) {
+            const uint64_t reserve = (uint64_t) ep_peer_reserve_mib << 20;
+            const auto fit = [&](uint64_t keep) {
+                return per_slot > 0 && (uint64_t) fb > keep ? (int64_t) (((uint64_t) fb - keep) / per_slot) : 0;
+            };
+            if (fit(reserve) < q1) {   // the pair cannot hold every expert: the tail
+                ep_cpu = true;
+                q1 = std::min(q1, fit(reserve + (512ull << 20)));
+            }
+            if (ep_cpu && q1 <= 0) {
                 std::fprintf(stderr, "strata generate: STRATA_EP_CPU: card %d has no room for experts (%.2f GiB free)\n",
                              o.ep_device, fb / 1073741824.0);
                 return 1;
