@@ -84,6 +84,9 @@ struct VerifyEp {
     /// window.  res1_on0 / res0_on1 then mark them as the other card's, so each card's plan leaves them out.
     const int32_t* h_res01 = nullptr;     ///< host [n_layers * n_expert]: >= 0 when either card holds the expert
     const int32_t* res01_on0 = nullptr;   ///< ... a copy in this card's memory
+    /// this card's table with the experts on neither card marked resident (res0_on1's values), in this card's memory:
+    /// the peer's rows are copied only for the peer's own experts (it sends no row for the CPU's)
+    const int32_t* res0n_on0 = nullptr;
     /// Point the run()'s pool user at h_res01 with no GPU plan (res != null), or put it back (null).
     void (*cpu_scope)(void* user, const int32_t* res) = nullptr;
 };

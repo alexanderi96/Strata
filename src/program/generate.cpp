@@ -9409,7 +9409,7 @@ int main(int argc, char** argv) {
         // STRATA_EP_CPU: each card's "other" table marks an expert on neither card as the other's (>= 0), so each
         // card's plan leaves it out without a plan error and card 1 sends only its own rows; the CPU computes it
         std::vector<int32_t> other0 = ep_h_res1, other1(host_res.begin(), host_res.end());
-        int32_t* res01_on0 = nullptr;
+        int32_t* res01_on0 = nullptr, * res0n_on0 = nullptr;
         if (ep_cpu) {
             ep_h_res01.assign(host_res.size(), strata::core::kNotResident);
             for (size_t i = 0; i < host_res.size(); ++i)
@@ -9418,6 +9418,13 @@ int main(int argc, char** argv) {
             if (cudaMalloc((void**) &res01_on0, nb) != cudaSuccess ||
                 cudaMemcpy(res01_on0, ep_h_res01.data(), nb, cudaMemcpyHostToDevice) != cudaSuccess) {
                 std::fprintf(stderr, "strata generate: STRATA_EP_CPU: the merged residency table failed\n");
+                return 1;
+            }
+            // card 0's table with the CPU's experts as resident, on card 0: card 0 copies the peer's rows only for
+            // the peer's own experts (like res0_on1, a snapshot: EP's placement is static)
+            if (cudaMalloc((void**) &res0n_on0, nb) != cudaSuccess ||
+                cudaMemcpy(res0n_on0, other1.data(), nb, cudaMemcpyHostToDevice) != cudaSuccess) {
+                std::fprintf(stderr, "strata generate: STRATA_EP_CPU: card 0's copy table failed\n");
                 return 1;
             }
         }
@@ -9458,6 +9465,7 @@ int main(int argc, char** argv) {
         if (ep_cpu) {
             ep_cfg.h_res01 = ep_h_res01.data();
             ep_cfg.res01_on0 = res01_on0;
+            ep_cfg.res0n_on0 = res0n_on0;
             ep_cfg.cpu_scope = &drive_ep_cpu_scope;
         }
     }

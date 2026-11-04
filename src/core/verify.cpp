@@ -2437,8 +2437,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             stamp(l, 20, grp);
             if (ep_on()) {   // the peer's rows are in the mapped region once its flag is up
                 ep_wait((const uint32_t*) ep_ret_d0_ + (size_t) ring * 16, ep_ctr0_, ep_spin_, ep_err0_, ring, cs);
+                // STRATA_EP_CPU: not the rows of the CPU's experts (the peer sends none; the CPU's copy follows)
                 ep_copy_peer_rows(parts_out, (const float*) ep_rows_d0_ + (size_t) tb * K * N, ids_ + tb * K,
-                                  hits_.d_res + l * g.n_expert, (int) cap, N, cs);
+                                  (ep_cpu() ? ep_cfg_.res0n_on0 : hits_.d_res) + l * g.n_expert, (int) cap, N, cs);
                 if (ep_cpu()) {   // STRATA_EP_CPU: the CPU's rows (entries on neither card) over what the peer left there
                     wait_flag_ge(m_ep_cpu_, ring, cs);
                     ep_copy_peer_rows(parts_out, m_ymiss_ + (size_t) tb * K * N, ids_ + tb * K,
@@ -2830,7 +2831,7 @@ bool Verifier::ep_init(std::string& err) {
         err = "verify: expert parallel: some experts are on neither card (every expert must be in one card's VRAM)";
         return false;
     }
-    if (ep_cpu() && (ep_cfg_.res01_on0 == nullptr || ep_cfg_.cpu_scope == nullptr)) {
+    if (ep_cpu() && (ep_cfg_.res01_on0 == nullptr || ep_cfg_.res0n_on0 == nullptr || ep_cfg_.cpu_scope == nullptr)) {
         err = "verify: expert parallel: STRATA_EP_CPU needs the merged residency table and the pool scope";
         return false;
     }
