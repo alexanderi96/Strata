@@ -8133,9 +8133,8 @@ int main(int argc, char** argv) {
         int64_t q1 = g.n_expert - q0;
         if (ep_cpu_env && q1 > 0) {
             // STRATA_EP_CPU=1: when card 1 cannot take the other q1 beside its reserve (the plain EP check below), it
-            // takes what fits less the reserve and 512 MiB for the verifiers' own buffers there (inbox, rows, plans,
-            // scratch, tables, graphs); the coldest rest of each layer is on neither card and the host's CPU pool
-            // computes it inside the window
+            // takes what fits beside that same reserve, which also covers its verifier's buffers as on the plain path;
+            // the coldest rest of each layer is on neither card and the host's CPU pool computes it inside the window
             size_t fb = 0, tb = 0;
             {
                 const strata::core::OnDevice on(o.ep_device);
@@ -8150,7 +8149,7 @@ int main(int argc, char** argv) {
             };
             if (fit(reserve) < q1) {   // the pair cannot hold every expert: the tail
                 ep_cpu = true;
-                q1 = std::min(q1, fit(reserve + (512ull << 20)));
+                q1 = fit(reserve);
             }
             if (ep_cpu && q1 <= 0) {
                 std::fprintf(stderr, "strata generate: STRATA_EP_CPU: card %d has no room for experts (%.2f GiB free)\n",
