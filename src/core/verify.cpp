@@ -2437,11 +2437,14 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             stamp(l, 20, grp);
             if (ep_on()) {   // the peer's rows are in the mapped region once its flag is up
                 ep_wait((const uint32_t*) ep_ret_d0_ + (size_t) ring * 16, ep_ctr0_, ep_spin_, ep_err0_, ring, cs);
+                stamp(l, 21, grp);   // STRATA_VERIFY_PROFILE: "waitB" is the wait for the peer here
                 // STRATA_EP_CPU: not the rows of the CPU's experts (the peer sends none; the CPU's copy follows)
                 ep_copy_peer_rows(parts_out, (const float*) ep_rows_d0_ + (size_t) tb * K * N, ids_ + tb * K,
                                   (ep_cpu() ? ep_cfg_.res0n_on0 : hits_.d_res) + l * g.n_expert, (int) cap, N, cs);
+                stamp(l, 22, grp);   // "PCIe grp": the copy of the peer's rows
                 if (ep_cpu()) {   // STRATA_EP_CPU: the CPU's rows (entries on neither card) over what the peer left there
                     wait_flag_ge(m_ep_cpu_, ring, cs);
+                    stamp(l, 23, grp);   // "waitCPU": what card 0 still waits for the host after the peer
                     ep_copy_peer_rows(parts_out, m_ymiss_ + (size_t) tb * K * N, ids_ + tb * K,
                                       ep_cfg_.res01_on0 + l * g.n_expert, (int) cap, N, cs);
                 }
