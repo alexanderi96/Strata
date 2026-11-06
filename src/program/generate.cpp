@@ -7680,6 +7680,20 @@ int main(int argc, char** argv) {
                             (long long) ((floor_b + (1ll << 20) - 1) >> 20));
                         ep_card0_reserve_mib = (floor_b + (1ll << 20) - 1) >> 20;
                         slots = slots_need;
+                    } else if (fit_q0 * g.n_layers > slots && !o.vram_reserve_given && std::getenv("STRATA_EP_CPU") != nullptr &&
+                               std::getenv("STRATA_EP_CPU")[0] == '1') {
+                        // STRATA_EP_CPU=1 and the pair cannot hold every expert even so: this card still goes down to
+                        // the same floor, so the CPU tail is what neither card has room for, not this card's reserve
+                        // (a --vram-reserve-mib given on the command line is kept, as in the other automatic steps)
+                        const int64_t s = std::min<int64_t>(fit_q0 * g.n_layers,
+                                                            profile.empty() ? INT64_MAX : (int64_t) profile.size());
+                        std::fprintf(stderr,
+                            "strata generate: expert cache auto: expert parallelism (STRATA_EP_CPU): the pair cannot hold "
+                            "every expert, so this card takes %lld per layer (cache %lld slots; this card's reserve "
+                            "becomes %lld MiB)\n",
+                            (long long) (s / g.n_layers), (long long) s, (long long) ((floor_b + (1ll << 20) - 1) >> 20));
+                        ep_card0_reserve_mib = (floor_b + (1ll << 20) - 1) >> 20;
+                        slots = s;
                     }
                 }
             }
