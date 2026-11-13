@@ -1,0 +1,56 @@
+name: PR 3913 test build (rx7900)
+
+# Builds the rx7900 engine package of this branch like the official one (.github/pr3913/build.sh), puts it in the
+# official v0.2.13 RX 7000 image with this branch's serve/server.py, pushes the image to this fork's ghcr.io and
+# attaches the package to a pre-release. Runs on a push to the pr3913-ci branch of the fork.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [pr3913-ci]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache /usr/local/share/boost
+          df -h / /mnt
+      - uses: actions/checkout@v4
+      - name: Engine package
+        run: |
+          sudo mkdir -p /mnt/w && sudo chmod 777 /mnt/w
+          docker run --rm -v "$PWD:/src" -v /mnt/w:/w ubuntu:22.04 bash /src/.github/pr3913/build.sh
+          sudo rm -rf /mnt/w/venv /mnt/w/out/b /mnt/w/out/bh /mnt/w/out/bv /mnt/w/out/bd
+      - name: Image
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE=ghcr.io/$owner/strata:0.2.13-pr3913-rocm-gfx110x" >> "$GITHUB_ENV"
+          mkdir ctx && sudo cp -r /mnt/w/out/components ctx/ && cp serve/server.py ctx/server.py
+          printf '%s\n' 'FROM ghcr.io/niko1221/strata:0.2.13-rocm-gfx110x' \
+            'RUN rm -rf /opt/strata/components/engine/*' \
+            'COPY components/engine/ /opt/strata/components/engine/' \
+            'COPY server.py /opt/strata/terminal/serve/server.py' > ctx/Dockerfile
+          docker build -t "ghcr.io/$owner/strata:0.2.13-pr3913-rocm-gfx110x" ctx
+      - name: Push image
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE"
+      - name: Pre-release with the engine package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pkg=$(ls -d /mnt/w/out/components/engine/*/)
+          name=strata-engine-0.1.59-pr3913-linux-x86_64-hip-rx7900.tar.gz
+          sudo tar -C "$pkg" -czf "$name" .
+          sha256sum "$name" > SHA256SUMS
+          tag=pr3913-test-$(git rev-parse --short HEAD)
+          gh release create "$tag" "$name" SHA256SUMS --prerelease --target "$GITHUB_SHA" \
+            --title "PR #3913 test build ($tag)" \
+            --notes "Strata v0.2.13 + PR #3913, RX 7000 (gfx1100/1101/1102), single card. Image: $IMAGE. Unofficial test build."
