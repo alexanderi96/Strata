@@ -386,6 +386,52 @@ Merge the field into the existing config (this is not a complete run config), ch
 engine, and remove it to go back. If the engine runs in a systemd unit, limit it with `MemoryMax`, never `MemoryHigh`:
 `MemoryHigh` counts the page cache that `--mmap-experts` reads from.
 
+**What happens.** ROCm maps host memory for the GPU through a KFD userptr (HMM) without pinning it. On a GPU without
+XNACK (every RDNA card) any invalidation of such a page (reclaim, swap, compaction, migration) evicts all of the
+process's GPU queues until the range is validated again; under memory pressure that lasts seconds to minutes. `/health`
+reports `kfd_evicted_ms`, how long the driver has kept the engine's queues evicted: a value that grows during a stall
+is this, not a hang (`null` in a container with its own PID namespace: run it with `--pid host`).
+
+**`HSA_USERPTR_FOR_PAGED_MEM=0`** makes ROCr back host allocations for the GPU with GTT: pages amdgpu pins itself, with
+no MMU notifier, so reclaim cannot evict the queues. With it the engine also allocates the expert complement in one go
+when the RAM *available* covers it (other files' page cache included: amdgpu reclaims that cache while it allocates,
+and refuses instead of calling the OOM killer); before, a start with the page cache full of other files took the
+paced path of #1250, which registers pageable memory in steps, a userptr again whatever this variable says.
+
+- ROCm 10.2 and later also need `"HSA_SVM_FOR_PAGED_MEM": "0"`: there host allocations go to SVM by default and
+  `HSA_USERPTR_FOR_PAGED_MEM=0` alone no longer gives GTT (a 1 GiB `hipHostMalloc` shows as `/dev/zero (deleted)` in
+  `/proc/<pid>/maps` and `mem_info_gtt_used` does not move). It has no effect on older ROCm, so it can always be set.
+- The GTT limit must hold the complement and the rest of the engine's host allocations for the GPU (about 6 GiB more at
+  256K context with int8 KV). It is half the RAM by default; raise it with the kernel parameter
+  `ttm.pages_limit=<4 KiB pages>` (11534336 = 44 GiB, read once when amdgpu loads) and check
+  `/sys/class/drm/card*/device/mem_info_gtt_total`. If the complement does not fit, the allocation is refused and the
+  paced path runs (the evictions come back).
+- GTT pages freed at stop go to TTM's page pool (up to half the RAM by default), which `MemFree` and `MemAvailable` do not
+  count: the next start sees less RAM and lowers the budget. `ttm.page_pool_size=262144` (1 GiB) returns them at stop.
+- GTT pages cannot be swapped: on a host short of RAM other processes take that pressure.
+
+The start log says which path the complement took:
+
+| Start log | What happened |
+| --- | --- |
+| `page-locked and mapped` | One allocation (GTT with the variable above) |
+| `GTT host memory (HSA_USERPTR_FOR_PAGED_MEM=0): ... available covers the complement and the reserve` | Free RAM was short, the RAM available covered it: one allocation, the driver reclaimed the cache |
+| `page-locked after taking the pages in steps` | The paced path: registered pageable memory, so the evictions can come back. Start with more RAM available, a smaller budget, or a higher GTT limit |
+
+Measured on one RX 7900 XTX (gfx1100, ROCm 7.10 of the `rx7900` package, Linux 6.18, 64 GB, Swift 1.5 IQ3_S, budget
+24 GiB, `ttm.pages_limit` 44 GiB, `ttm.page_pool_size` 262144, no desktop on the card), a cold start and then two fresh
+44K-token prompts:
+
+| | Start-up path | Queue eviction after start / after the prompts | Second prompt read |
+| --- | --- | --- | --- |
+| default, enough free RAM | one allocation (userptr) | 0 / 52.8 s | 1,709 tok/s |
+| `HSA_USERPTR_FOR_PAGED_MEM=0`, enough free RAM | one allocation (GTT) | 0 / 0 | 2,284 tok/s |
+| default, page cache full of other files | paced | 19.0 s / 53.2 s | 1,961 tok/s |
+| `HSA_USERPTR_FOR_PAGED_MEM=0`, page cache full, before this change | paced | 131.3 s / 149.6 s | 2,000 tok/s |
+| `HSA_USERPTR_FOR_PAGED_MEM=0`, page cache full, with this change | one allocation (GTT) | 0 / 0 | 2,287 tok/s |
+
+The first prompt after a start reads at 450-1,050 tok/s in every row (the adaptive tier warming up).
+
 ## RDNA4 (gfx1201)
 
 The RX 9070 / 9070 XT and the Radeon AI PRO R9700 run the same kernels as gfx1100: wave32, 64 KiB of LDS per workgroup, the
